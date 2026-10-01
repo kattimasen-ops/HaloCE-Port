@@ -1,10 +1,10 @@
 name: Build Halo CE for M9 Pro (RK3326)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Erlaubt den manuellen Start über den "Run workflow" Button
   push:
     branches:
-      - main
+      - main # Startet automatisch bei Änderungen im main-Branch
     paths-ignore:
       - 'README.md'
 
@@ -16,12 +16,15 @@ jobs:
       - name: 📥 Repository auschecken
         uses: actions/checkout@v4
 
-      - name: 🛠️ Installiere Build-Abhängigkeiten (inkl. ARM64 Ubuntu Ports)
+      - name: 🛠️ APT-Quellen für ARM64 konfigurieren & Abhängigkeiten installieren
         run: |
+          # 1. ARM64-Architektur für Cross-Compilation aktivieren
           sudo dpkg --add-architecture arm64
           
+          # 2. Bestehende Host-Quellen (amd64) explizit auf amd64 festlegen
           sudo sed -i 's/Types: deb/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
           
+          # 3. Offizielle ports.ubuntu.com Server für ARM64-Pakete hinzufügen
           cat << 'EOF' | sudo tee /etc/apt/sources.list.d/ubuntu-arm64.sources
           Types: deb
           Architectures: arm64
@@ -30,9 +33,8 @@ jobs:
           Components: main restricted universe multiverse
           EOF
           
+          # 4. Paketlisten aktualisieren & Build-Tools + ARM64-Libs installieren
           sudo apt-get update
-          
-          # libsdl3-dev entfernt! Dafür cmake und wayland/xkb (für SDL3 Build) hinzugefügt
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential git python3 ninja-build clang lld llvm cmake \
             wget zip ca-certificates pkg-config \
@@ -41,14 +43,14 @@ jobs:
             libdrm-dev:arm64 libx11-dev:arm64 libasound2-dev:arm64 \
             libpulse-dev:arm64 libwayland-dev:arm64 libxkbcommon-dev:arm64
 
-      - name: 🏗️ Baue SDL3 aus dem Quellcode (Cross-Compile für ARM64)
+      - name: 🏗️ Baue SDL3 für ARM64 aus den Quellen
         run: |
-          # Lade SDL3 Quellcode herunter
-          git clone --depth=1 -b release-3.1.3 https://github.com/libsdl-org/SDL.git sdl3-src
+          # SDL3 Quellcode herunterladen (neuester Stand vom Main-Branch)
+          git clone --depth=1 https://github.com/libsdl-org/SDL.git sdl3-src
           cd sdl3-src
           mkdir build && cd build
           
-          # Cross-Compile SDL3 und installiere es in den ARM64 Multiarch-Pfad
+          # Cross-Compile für ARM64 und Installation in die Ubuntu-Multiarch-Systempfade
           cmake .. \
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
@@ -64,6 +66,7 @@ jobs:
 
       - name: 🔗 Arbeitsverzeichnis verlinken (/work)
         run: |
+          # Verlinkt den GitHub Workspace nach /work, damit Skripte mit absoluten Pfaden funktionieren
           sudo ln -s $GITHUB_WORKSPACE /work
 
       - name: 🚀 Führe build.sh aus
@@ -75,10 +78,14 @@ jobs:
         run: |
           mkdir -p release/haloce
           
+          # 1. Kompiliertes Binary aus dem Output-Pfad kopieren
           cp /work/out/haloce.aarch64/halo_ce_rk3326 release/haloce/
+          
+          # 2. Lokale Start- und Steuerungs-Skripte dazulegen
           cp haloce.sh release/haloce/
           cp haloce.gptk release/haloce/
           
+          # 3. Ausführrechte für die Ziel-Binaries setzen
           chmod +x release/haloce/halo_ce_rk3326
           chmod +x release/haloce/haloce.sh
 

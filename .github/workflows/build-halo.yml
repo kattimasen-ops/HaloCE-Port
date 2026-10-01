@@ -34,13 +34,10 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential git python3 ninja-build clang lld llvm cmake \
             wget zip ca-certificates pkg-config \
-            crossbuild-essential-arm64 libc6-dev-i386 \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu crossbuild-essential-arm64 \
             libgbm-dev:arm64 libegl1-mesa-dev:arm64 libgles2-mesa-dev:arm64 \
             libdrm-dev:arm64 libx11-dev:arm64 libasound2-dev:arm64 \
             libpulse-dev:arm64 libwayland-dev:arm64 libxkbcommon-dev:arm64
-
-          # Symlink für 32-Bit Linux Kernel Header
-          sudo ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm
 
       - name: 🏗️ Baue SDL3 für ARM64 aus den Quellen (KMSDRM Support)
         run: |

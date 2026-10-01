@@ -34,22 +34,8 @@ if [ -f "/work/patch_haloce_arm64.py" ]; then
   python3 /work/patch_haloce_arm64.py
 fi
 
-echo "==> Ermittle gepatchtes ARM64-Target für configure.py..."
-TARGET_ARG=""
-if python3 configure.py --help 2>&1 | grep -q "linux_arm64"; then
-  TARGET_ARG="--target=linux_arm64"
-elif python3 configure.py --help 2>&1 | grep -q "linux_arm64_32"; then
-  TARGET_ARG="--target=linux_arm64_32"
-elif python3 configure.py --help 2>&1 | grep -q "linux_aarch64"; then
-  TARGET_ARG="--target=linux_aarch64"
-elif python3 configure.py --help 2>&1 | grep -q "arm64"; then
-  TARGET_ARG="--target=arm64"
-elif python3 configure.py --help 2>&1 | grep -q "rk3326"; then
-  TARGET_ARG="--target=rk3326"
-fi
-
-echo "==> Konfiguriere Build mit Target: ${TARGET_ARG:-default}"
-python3 configure.py ${TARGET_ARG} --lto=thin
+echo "==> Konfiguriere Build..."
+python3 configure.py --lto=thin
 
 echo "==> Baue Halo CE..."
 ninja

@@ -16,6 +16,33 @@ jobs:
       - name: 📥 Repository auschecken
         uses: actions/checkout@v4
 
+      - name: 🛠️ Installiere Build-Abhängigkeiten (inkl. ARM64 Ubuntu Ports)
+        run: |
+          # 1. ARM64 Architektur für Cross-Compilation aktivieren
+          sudo dpkg --add-architecture arm64
+          
+          # 2. Bestehende Standard-Quellen auf die Host-Architektur (amd64) beschränken
+          sudo sed -i 's/Types: deb/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
+          
+          # 3. Spezielle ports.ubuntu.com Quellen für ARM64 hinzufügen
+          cat << 'EOF' | sudo tee /etc/apt/sources.list.d/ubuntu-arm64.sources
+          Types: deb
+          Architectures: arm64
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-security noble-backports
+          Components: main restricted universe multiverse
+          EOF
+          
+          # 4. Paketlisten updaten und ARM64-Abhängigkeiten installieren
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential git python3 ninja-build clang lld llvm \
+            wget zip ca-certificates pkg-config \
+            crossbuild-essential-arm64 \
+            libsdl3-dev:arm64 \
+            libgbm-dev:arm64 libegl1-mesa-dev:arm64 libgles2-mesa-dev:arm64 \
+            libdrm-dev:arm64 libx11-dev:arm64 libasound2-dev:arm64 libpulse-dev:arm64
+
       - name: 🔗 Arbeitsverzeichnis verlinken (/work)
         run: |
           # Das build.sh Skript erwartet die Dateien im Ordner /work.
@@ -24,7 +51,7 @@ jobs:
 
       - name: 🚀 Führe build.sh aus
         run: |
-          # Skript ausführbar machen und mit Root-Rechten starten (notwendig für apt-get)
+          # Skript ausführbar machen und mit Root-Rechten starten (notwendig für interne apt-Befehle, falls noch vorhanden)
           chmod +x build.sh
           sudo -E bash build.sh
 

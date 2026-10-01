@@ -15,7 +15,6 @@ apt-get install -y --no-install-recommends \
   build-essential git pkg-config ca-certificates wget zip \
   python3 ninja-build clang lld llvm cmake \
   gcc-aarch64-linux-gnu g++-aarch64-linux-gnu crossbuild-essential-arm64 \
-  libc6-dev-i386 gcc-multilib g++-multilib \
   libgbm-dev:arm64 libegl1-mesa-dev:arm64 libgles2-mesa-dev:arm64 \
   libdrm-dev:arm64 libx11-dev:arm64 libasound2-dev:arm64 libpulse-dev:arm64
 
@@ -30,13 +29,18 @@ if [ ! -d "halo-ce-universal" ]; then
 fi
 cd halo-ce-universal
 
-echo "==> Säubere alten Build-Cache..."
+echo "==> Lösche alten Build-Ordner..."
 rm -rf build
 
-echo "==> Wende RK3326 spezifische Python-Patches an"
+echo "==> Wende RK3326 spezifische Python-Patches an..."
 if [ -f "/work/patch_haloce_arm64.py" ]; then
   python3 /work/patch_haloce_arm64.py
 fi
+
+echo "==> Patche configure.py direkt für ARM64 (aarch64)..."
+sed -i 's/--target=i686-linux-gnu/--target=aarch64-linux-gnu/g' configure.py
+sed -i 's/-m32//g' configure.py
+sed -i 's/-malign-double//g' configure.py
 
 echo "==> Konfiguriere Build..."
 python3 configure.py --lto=thin

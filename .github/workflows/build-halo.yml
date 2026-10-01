@@ -1,0 +1,55 @@
+name: Build Halo CE for M9 Pro (RK3326)
+
+on:
+  workflow_dispatch: # Erlaubt den manuellen Start über den "Run workflow" Button
+  push:
+    branches:
+      - main # Startet automatisch, wenn du Änderungen in den main-Branch pushst
+    paths-ignore:
+      - 'README.md'
+
+jobs:
+  build-haloce-rk3326:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: 📥 Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: 🔗 Arbeitsverzeichnis verlinken (/work)
+        run: |
+          # Das build.sh Skript erwartet die Dateien im Ordner /work.
+          # Dieser Befehl linkt das GitHub-Workspace-Verzeichnis (dein Repo) nach /work.
+          sudo ln -s $GITHUB_WORKSPACE /work
+
+      - name: 🚀 Führe build.sh aus
+        run: |
+          # Skript ausführbar machen und mit Root-Rechten starten (notwendig für apt-get)
+          chmod +x build.sh
+          sudo -E bash build.sh
+
+      - name: 📦 Erstelle Release-Ordner & kopiere lokale Skripte
+        run: |
+          mkdir -p release/haloce
+          
+          # 1. Kopiere das frisch kompilierte Spiel aus dem Output-Verzeichnis der build.sh
+          cp /work/out/haloce.aarch64/halo_ce_rk3326 release/haloce/
+          
+          # 2. Kopiere deine Start- und Steuerungs-Skripte aus dem Hauptverzeichnis deines Repos
+          cp haloce.sh release/haloce/
+          cp haloce.gptk release/haloce/
+          
+          # 3. Stelle sicher, dass die ausführbaren Dateien die korrekten Rechte haben
+          chmod +x release/haloce/halo_ce_rk3326
+          chmod +x release/haloce/haloce.sh
+
+      - name: 🗜️ Archiviere Build
+        run: |
+          cd release
+          zip -r HaloCE_M9Pro_RK3326.zip haloce/
+
+      - name: 📤 Lade Release Artifact hoch
+        uses: actions/upload-artifact@v4
+        with:
+          name: HaloCE-M9Pro-RK3326-Build
+          path: release/HaloCE_M9Pro_RK3326.zip

@@ -7,11 +7,10 @@ set -e
 export DEBIAN_FRONTEND=noninteractive
 echo "==> Host arch: $(uname -m)"
 
-# APT Update (Quellen wurden bereits vom YAML-Workflow eingerichtet)
+# APT Update
 apt-get update
 
-echo "==> Installiere Build-Tools (Python, Ninja, Clang für arm64_32)"
-# libsdl3-dev:arm64 wurde entfernt, da SDL3 bereits im YAML gebaut wurde
+echo "==> Installiere Build-Tools"
 apt-get install -y --no-install-recommends \
   build-essential git pkg-config ca-certificates wget zip \
   python3 ninja-build clang lld llvm \
@@ -31,16 +30,28 @@ fi
 cd halo-ce-universal
 
 echo "==> Wende RK3326 spezifische Python-Patches an"
-python3 /work/patch_haloce_arm64.py
+if [ -f "/work/patch_haloce_arm64.py" ]; then
+  python3 /work/patch_haloce_arm64.py
+fi
 
 echo "==> Konfiguriere Build..."
-python3 configure.py --lto=thin 
+python3 configure.py --lto=thin
 
-echo "==> Baue Halo CE..."
-ninja linux_rk3326_guest
+echo "==> Baue Halo CE (Standard-Target)..."
+ninja
 
-# Kopiere das fertige Binary in den Output-Ordner
+echo "==> Suche und kopiere kompilierte Executable..."
 mkdir -p "${OUT_DIR}"
-cp build/linux_rk3326/halo_ce "${OUT_DIR}/halo_ce_rk3326"
+
+# Findet das gebaute Binary im build-Verzeichnis automatisch
+BINARY_PATH=$(find build -type f -executable -name "halo_ce*" -o -name "halo*" | head -n 1)
+
+if [ -n "$BINARY_PATH" ]; then
+  cp "$BINARY_PATH" "${OUT_DIR}/halo_ce_rk3326"
+  echo "==> Binary erfolgreich kopiert: $BINARY_PATH -> ${OUT_DIR}/halo_ce_rk3326"
+else
+  echo "❌ FEHLER: Kein kompilierte Executable im Ordner 'build' gefunden!"
+  exit 1
+fi
 
 echo "==> Build erfolgreich beendet."

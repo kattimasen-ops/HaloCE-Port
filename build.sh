@@ -1,740 +1,706 @@
-#!/bin/bash
-# ============================================================
-# Halo CE Universal - ARM Cross Build / Architecture Analyzer
-#
-# Host:
-#   Ubuntu 24.04 x86_64
-#
-# Target hardware:
-#   Rockchip RK3326 / Cortex-A35
-#
-# IMPORTANT:
-#   The upstream Linux port is 32-bit x86.
-#   The Android port uses an ILP32 AArch64 guest because the
-#   Halo/Xbox data structures contain 32-bit pointers.
-#
-# This script therefore DOES NOT blindly replace i686 with
-# aarch64-linux-gnu.
-#
-# It analyzes the project first and selects the only ABI which
-# can actually represent the required 32-bit data layout.
-# ============================================================
+#!/usr/bin/env python3
 
-set -euo pipefail
+"""
+Halo CE architecture analyzer / safe ARM patcher.
 
-export DEBIAN_FRONTEND=noninteractive
+IMPORTANT:
 
-SRC_DIR="${SRC_DIR:-/work/src}"
-OUT_DIR="${OUT_DIR:-/work/out/haloce}"
-REPO_DIR="${SRC_DIR}/halo-ce-universal"
+The Halo game data uses 32-bit pointers.
 
-TARGET_CPU="${TARGET_CPU:-cortex-a35}"
+The upstream Linux port is a 32-bit x86 port.
 
-mkdir -p "${SRC_DIR}"
-mkdir -p "${OUT_DIR}"
+A normal AArch64 Linux process uses LP64:
+    sizeof(void*) == 8
 
-echo
-echo "============================================================"
-echo " Halo CE - ARM Architecture Analysis"
-echo "============================================================"
-echo
+Therefore replacing i686 with aarch64-linux-gnu is NOT sufficient.
 
-echo "Host:"
-uname -a
-echo
-echo "Host architecture:"
-uname -m
-echo
+This script:
 
-# ------------------------------------------------------------
-# 1. Dependencies
-# ------------------------------------------------------------
+  * detects the project's ABI requirements
+  * detects Android ILP32 support
+  * detects 32-bit structure assertions
+  * tests available Clang targets
+  * tests AArch64 ILP32 compiler support
+  * tests ARM32 Linux support
+  * refuses unsafe structure rewriting
+  * can patch only safe, known compiler flags
+"""
 
-echo "============================================================"
-echo "1. Installing build dependencies"
-echo "============================================================"
+from __future__ import annotations
 
-apt-get update
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
-apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    pkg-config \
-    ca-certificates \
-    wget \
-    curl \
-    unzip \
-    zip \
-    file \
-    python3 \
-    python3-pip \
-    ninja-build \
-    clang \
-    lld \
-    llvm \
-    cmake \
-    gcc-aarch64-linux-gnu \
-    g++-aarch64-linux-gnu \
-    gcc-arm-linux-gnueabihf \
-    g++-arm-linux-gnueabihf \
-    binutils-aarch64-linux-gnu \
-    binutils-arm-linux-gnueabihf \
-    crossbuild-essential-arm64 \
-    crossbuild-essential-armhf \
-    libgbm-dev:arm64 \
-    libegl1-mesa-dev:arm64 \
-    libgles2-mesa-dev:arm64 \
-    libdrm-dev:arm64 \
-    libx11-dev:arm64 \
-    libasound2-dev:arm64 \
-    libpulse-dev:arm64
 
-echo
-echo "Compiler versions:"
-clang --version | head -n 1
-ld.lld --version | head -n 1
-aarch64-linux-gnu-gcc --version | head -n 1
-arm-linux-gnueabihf-gcc --version | head -n 1
-echo
+ROOT = Path(__file__).resolve().parent
 
-# ------------------------------------------------------------
-# 2. Repository
-# ------------------------------------------------------------
 
-echo "============================================================"
-echo "2. Repository"
-echo "============================================================"
+def run(
+    command: list[str],
+    *,
+    check: bool = False,
+) -> tuple[int, str]:
 
-cd "${SRC_DIR}"
+    try:
 
-if [ ! -d "${REPO_DIR}/.git" ]; then
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
 
-    echo "==> Cloning repository..."
+        if check and result.returncode != 0:
+            raise RuntimeError(
+                f"Command failed: {' '.join(command)}\n"
+                f"{result.stdout}"
+            )
 
-    rm -rf "${REPO_DIR}"
+        return result.returncode, result.stdout
 
-    git clone \
-        --depth=1 \
-        https://github.com/cybersecurity/halo-ce-universal.git \
-        "${REPO_DIR}"
+    except FileNotFoundError:
 
-else
+        return 127, ""
 
-    echo "==> Repository already exists."
 
-fi
+def read_text(path: Path) -> str:
 
-cd "${REPO_DIR}"
+    try:
 
-echo
-echo "Repository:"
-git remote -v || true
-echo
-echo "Commit:"
-git rev-parse HEAD
-echo
+        return path.read_text(
+            encoding="utf-8",
+            errors="ignore",
+        )
 
-# ------------------------------------------------------------
-# 3. First configure
-#
-# The upstream configure script downloads dependencies and may
-# perform an internal checkout. Allow that ONCE.
-# ------------------------------------------------------------
+    except OSError:
 
-echo "============================================================"
-echo "3. Initial configure / dependency bootstrap"
-echo "============================================================"
+        return ""
 
-python3 configure.py --lto=thin || true
 
-# ------------------------------------------------------------
-# 4. Disable internal checkout
-# ------------------------------------------------------------
+def grep_tree(
+    directories: list[str],
+    pattern: str,
+) -> list[Path]:
 
-echo "============================================================"
-echo "4. Protect local architecture changes"
-echo "============================================================"
+    regex = re.compile(pattern)
 
-if grep -q "git checkout" configure.py; then
+    matches: list[Path] = []
 
-    echo "==> Disabling configure.py internal git checkout."
+    for directory in directories:
 
-    sed -i \
-        's/git checkout/echo skipping git checkout/g' \
-        configure.py
+        root = ROOT / directory
 
-else
+        if not root.exists():
+            continue
 
-    echo "==> No internal git checkout found."
+        for path in root.rglob("*"):
 
-fi
+            if not path.is_file():
+                continue
 
-# ------------------------------------------------------------
-# 5. Optional external patch script
-# ------------------------------------------------------------
+            if path.suffix not in {
+                ".c",
+                ".h",
+                ".cpp",
+                ".hpp",
+                ".py",
+                ".ld",
+            }:
+                continue
 
-if [ -f "/work/patch_haloce_arm64.py" ]; then
+            content = read_text(path)
 
-    echo
-    echo "============================================================"
-    echo "5. Running architecture analyzer / patcher"
-    echo "============================================================"
+            if regex.search(content):
+                matches.append(path)
 
-    python3 /work/patch_haloce_arm64.py
+    return matches
 
-fi
 
-# ------------------------------------------------------------
-# 6. Repository architecture analysis
-# ------------------------------------------------------------
+def detect_project() -> dict[str, bool]:
 
-echo
-echo "============================================================"
-echo "6. Analyze project architecture"
-echo "============================================================"
+    linux_guard = bool(
+        grep_tree(
+            ["port", "source", "include"],
+            r"the Linux port targets 32-bit x86",
+        )
+    )
 
-ANALYSIS_LOG="${OUT_DIR}/architecture-analysis.txt"
+    size_asserts = bool(
+        grep_tree(
+            ["source"],
+            r"(sizeof\s*\(\s*struct|offsetof\s*\(\s*struct)",
+        )
+    )
 
-python3 /work/patch_haloce_arm64.py \
-    --analyze-only \
-    2>&1 | tee "${ANALYSIS_LOG}" || true
+    android_ilp32 = bool(
+        grep_tree(
+            ["port/android", "guest", "host", "tools"],
+            r"\bILP32\b",
+        )
+    )
 
-# ------------------------------------------------------------
-# 7. Detect project requirements
-# ------------------------------------------------------------
+    arm64_32 = bool(
+        grep_tree(
+            ["port/android", "guest", "host", "tools"],
+            r"arm64_32",
+        )
+    )
 
-echo
-echo "============================================================"
-echo "7. Detect Halo ABI requirements"
-echo "============================================================"
+    return {
+        "linux_guard": linux_guard,
+        "size_asserts": size_asserts,
+        "android_ilp32": android_ilp32,
+        "arm64_32": arm64_32,
+    }
 
-HAS_32BIT_GUARD=0
-HAS_SIZE_ASSERTS=0
-HAS_ANDROID_ILP32=0
-HAS_ARM64_32=0
 
-if grep -Rqs \
-    "the Linux port targets 32-bit x86" \
-    port source include 2>/dev/null; then
+def clang_target_help() -> str:
 
-    HAS_32BIT_GUARD=1
+    clang = shutil.which("clang")
 
-fi
+    if clang is None:
+        return ""
 
-if grep -RqsE \
-    "sizeof\(struct .*== 0x|offsetof\(struct .*== 0x" \
-    source 2>/dev/null; then
+    _, output = run(
+        [
+            clang,
+            "--print-targets",
+        ]
+    )
 
-    HAS_SIZE_ASSERTS=1
+    return output
 
-fi
 
-if grep -Rqs \
-    "arm64_32" \
-    port/android tools guest 2>/dev/null; then
+def test_aarch64_lp64() -> bool:
 
-    HAS_ARM64_32=1
+    clang = shutil.which("clang")
 
-fi
+    if clang is None:
+        return False
 
-if grep -Rqs \
-    "ILP32" \
-    port/android tools guest 2>/dev/null; then
+    source = ROOT / ".arm64_abi_test.c"
 
-    HAS_ANDROID_ILP32=1
-
-fi
-
-echo "32-bit Linux guard:      ${HAS_32BIT_GUARD}"
-echo "Structure size asserts:  ${HAS_SIZE_ASSERTS}"
-echo "Android ILP32 support:  ${HAS_ANDROID_ILP32}"
-echo "arm64_32 support:       ${HAS_ARM64_32}"
-
-# ------------------------------------------------------------
-# 8. Native AArch64 ABI test
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "8. Test native AArch64 ABI"
-echo "============================================================"
-
-cat > "${OUT_DIR}/abi_test.c" <<'EOF'
-#include <stdio.h>
+    source.write_text(
+        r"""
 #include <stdint.h>
 #include <stddef.h>
 
-struct abi_test {
-    void *pointer;
+struct test_struct {
+    void *ptr;
     uint32_t value;
 };
 
+_Static_assert(sizeof(void *) == 8, "not LP64");
+_Static_assert(sizeof(struct test_struct) >= 8, "invalid ABI");
+
 int main(void)
 {
-    printf("sizeof(void*)=%zu\n", sizeof(void *));
-    printf("sizeof(long)=%zu\n", sizeof(long));
-    printf("sizeof(int)=%zu\n", sizeof(int));
-    printf("sizeof(struct abi_test)=%zu\n", sizeof(struct abi_test));
-    printf("offsetof(value)=%zu\n",
-           offsetof(struct abi_test, value));
-
     return 0;
 }
-EOF
+""",
+        encoding="utf-8",
+    )
 
-ABI_AARCH64="${OUT_DIR}/abi-aarch64"
+    output = ROOT / ".arm64_abi_test"
 
-if clang \
-    --target=aarch64-linux-gnu \
-    --sysroot=/usr/aarch64-linux-gnu \
-    -mcpu="${TARGET_CPU}" \
-    "${OUT_DIR}/abi_test.c" \
-    -o "${ABI_AARCH64}"; then
+    try:
 
-    echo "==> Native AArch64 compiler test succeeded."
+        returncode, _ = run(
+            [
+                clang,
+                "--target=aarch64-linux-gnu",
+                "--sysroot=/usr/aarch64-linux-gnu",
+                "-mcpu=cortex-a35",
+                str(source),
+                "-o",
+                str(output),
+            ]
+        )
 
-    file "${ABI_AARCH64}" || true
+        return returncode == 0
 
-    if "${ABI_AARCH64}" >/dev/null 2>&1; then
-        echo "==> AArch64 executable runs on host unexpectedly."
-    else
-        echo "==> Expected: ARM64 executable cannot execute on x86 host."
-    fi
+    finally:
 
-    echo
-    echo "AArch64 ABI:"
-    readelf -h "${ABI_AARCH64}" | grep -E \
-        'Class:|Machine:' || true
+        try:
+            source.unlink()
+        except OSError:
+            pass
 
-else
+        try:
+            output.unlink()
+        except OSError:
+            pass
 
-    echo "WARNING: Native AArch64 compiler test failed."
 
-fi
+def test_aarch64_ilp32() -> bool:
 
-# ------------------------------------------------------------
-# 9. Explicitly test AArch64 ILP32 compiler support
-#
-# We do NOT assume that -mabi=ilp32 is usable for Linux.
-# The compiler may accept it while the required Linux libc/
-# loader does not exist.
-# ------------------------------------------------------------
+    clang = shutil.which("clang")
 
-echo
-echo "============================================================"
-echo "9. Test AArch64 ILP32 support"
-echo "============================================================"
+    if clang is None:
+        return False
 
-ABI_ILP32="${OUT_DIR}/abi-aarch64-ilp32"
-
-ILP32_SUPPORTED=0
-
-if clang \
-    --target=aarch64-linux-gnu \
-    --sysroot=/usr/aarch64-linux-gnu \
-    -mabi=ilp32 \
-    -mcpu="${TARGET_CPU}" \
-    "${OUT_DIR}/abi_test.c" \
-    -o "${ABI_ILP32}" \
-    2>"${OUT_DIR}/ilp32-build.log"; then
-
-    echo "==> Compiler accepted AArch64 ILP32."
-
-    if file "${ABI_ILP32}" | grep -qi \
-        "ARM aarch64"; then
-
-        ILP32_SUPPORTED=1
+    source = ROOT / ".arm64_ilp32_test.c"
 
-    fi
-
-else
-
-    echo "==> Compiler/sysroot cannot build AArch64 ILP32."
-
-fi
+    source.write_text(
+        r"""
+#include <stdint.h>
+#include <stddef.h>
 
-cat "${OUT_DIR}/ilp32-build.log" || true
+_Static_assert(sizeof(void *) == 4,
+               "AArch64 ILP32 is not active");
 
-echo
-echo "Compiler-level AArch64 ILP32 support: ${ILP32_SUPPORTED}"
+_Static_assert(sizeof(long) == 4,
+               "long is not 32 bit");
 
-# ------------------------------------------------------------
-# 10. IMPORTANT ARCHITECTURE DECISION
-# ------------------------------------------------------------
+int main(void)
+{
+    return 0;
+}
+""",
+        encoding="utf-8",
+    )
 
-echo
-echo "============================================================"
-echo "10. Architecture decision"
-echo "============================================================"
+    output = ROOT / ".arm64_ilp32_test"
 
-if [ "${HAS_SIZE_ASSERTS}" -eq 1 ] && \
-   [ "${HAS_32BIT_GUARD}" -eq 1 ]; then
+    try:
 
-    echo
-    echo "The source explicitly requires a 32-bit data model."
-    echo
-    echo "A normal aarch64-linux-gnu build is LP64:"
-    echo "  sizeof(void*) = 8"
-    echo
-    echo "The Halo data structures require 32-bit pointers."
-    echo
-    echo "The Android port solves this with an ILP32 guest."
-    echo
-    echo "Therefore:"
-    echo
-    echo "  aarch64-linux-gnu + normal Linux libc"
-    echo "  is NOT accepted as a valid Halo guest ABI."
-    echo
-
-fi
+        returncode, text = run(
+            [
+                clang,
+                "--target=aarch64-linux-gnu",
+                "--sysroot=/usr/aarch64-linux-gnu",
+                "-mabi=ilp32",
+                "-mcpu=cortex-a35",
+                str(source),
+                "-o",
+                str(output),
+            ]
+        )
 
-# ------------------------------------------------------------
-# 11. Do NOT disable size assertions
-# ------------------------------------------------------------
+        print(text)
 
-echo
-echo "============================================================"
-echo "11. Verify structure assertions remain enabled"
-echo "============================================================"
+        return returncode == 0
 
-if grep -RInE \
-    --include='*.h' \
-    --include='*.c' \
-    'size_assert|offset_assert|sizeof\(struct|offsetof\(struct' \
-    source \
-    > "${OUT_DIR}/structure-assertions.txt" \
-    2>/dev/null; then
+    finally:
 
-    echo "==> Structure assertions detected:"
-    wc -l "${OUT_DIR}/structure-assertions.txt"
-
-else
-
-    echo "WARNING: No structure assertions detected."
-
-fi
-
-# ------------------------------------------------------------
-# 12. Test ARM32 Linux fallback
-#
-# This is the important Linux-compatible fallback:
-#
-#   ARMv8 CPU
-#       |
-#       +-- AArch32 execution
-#             |
-#             +-- 32-bit pointers
-#             +-- Linux ABI
-#
-# RK3326/Cortex-A35 hardware is capable of AArch32 execution,
-# but the target kernel/userspace must provide 32-bit support.
-#
-# We only build this fallback if the user explicitly allows it.
-# ------------------------------------------------------------
-
-ALLOW_ARM32_FALLBACK="${ALLOW_ARM32_FALLBACK:-1}"
-
-echo
-echo "============================================================"
-echo "12. ARM32 Linux compatibility test"
-echo "============================================================"
-
-ARM32_TEST="${OUT_DIR}/abi-arm32"
-
-if [ "${ALLOW_ARM32_FALLBACK}" = "1" ]; then
-
-    if arm-linux-gnueabihf-gcc \
-        -mcpu="${TARGET_CPU}" \
-        -marm \
-        "${OUT_DIR}/abi_test.c" \
-        -o "${ARM32_TEST}"; then
-
-        echo "==> ARM32 Linux toolchain works."
-
-        file "${ARM32_TEST}" || true
-
-        readelf -h "${ARM32_TEST}" | grep -E \
-            'Class:|Machine:' || true
-
-    else
-
-        echo "WARNING: ARM32 Linux compiler test failed."
-
-    fi
-
-else
-
-    echo "ARM32 fallback disabled."
-fi
-
-# ------------------------------------------------------------
-# 13. Decide what is actually buildable
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "13. Final build-mode selection"
-echo "============================================================"
-
-if [ "${ILP32_SUPPORTED}" -eq 1 ]; then
-
-    echo
-    echo "WARNING:"
-    echo "Compiler accepts AArch64 ILP32, but Linux runtime support"
-    echo "must still be verified. Ubuntu/glibc does not provide a"
-    echo "normal supported AArch64 ILP32 userspace."
-    echo
-    echo "The script will NOT silently use it."
-    echo
-
-fi
-
-# ------------------------------------------------------------
-# 14. Use upstream Android architecture knowledge if needed
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "14. Inspect Android ILP32 implementation"
-echo "============================================================"
-
-if [ "${HAS_ARM64_32}" -eq 1 ]; then
-
-    echo
-    echo "Relevant Android ILP32 files:"
-    find \
-        port/android \
-        guest \
-        host \
-        tools \
-        -type f \
-        \( \
-            -name '*.c' \
-            -o \
-            -name '*.h' \
-            -o \
-            -name '*.py' \
-            -o \
-            -name '*.ld' \
-        \) \
-        -print \
-        2>/dev/null \
-        | grep -E \
-            'android|guest|host|abi|ilp32' \
-        | sort \
-        | head -n 200 \
-        || true
-
-fi
-
-# ------------------------------------------------------------
-# 15. Build strategy
-# ------------------------------------------------------------
-#
-# We deliberately refuse to pretend that LP64 is compatible.
-#
-# To produce a native ARM64 Linux binary, the Linux port itself
-# needs the Android-style guest/host split:
-#
-#     RK3326 Linux host
-#           |
-#           +-- native AArch64 host library
-#           |
-#           +-- ILP32 AArch64 guest
-#
-# The upstream Android implementation already contains most of
-# this architecture, but it is coupled to Android's NDK/runtime.
-#
-# Automatically rewriting C structs would corrupt the binary
-# layout and is therefore explicitly forbidden here.
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "15. Build validation"
-echo "============================================================"
-
-if [ "${HAS_SIZE_ASSERTS}" -eq 1 ] && \
-   [ "${HAS_32BIT_GUARD}" -eq 1 ]; then
-
-    echo
-    echo "============================================================"
-    echo "STOP: Native AArch64 Linux LP64 build is ABI-incompatible"
-    echo "============================================================"
-    echo
-    echo "Detected:"
-    echo "  - Linux port requires 32-bit x86-style data layout"
-    echo "  - Halo structures contain 32-bit pointers"
-    echo "  - Native AArch64 Linux uses 64-bit pointers"
-    echo "  - Structure size/offset assertions enforce the original ABI"
-    echo
-    echo "A normal:"
-    echo
-    echo "  --target=aarch64-linux-gnu"
-    echo
-    echo "build MUST NOT continue."
-    echo
-    echo "The upstream project already solves the same fundamental"
-    echo "problem in the Android port using an ILP32 AArch64 guest."
-    echo
-    echo "See:"
-    echo "  port/android/README.md"
-    echo
-    echo "For a native RK3326 Linux executable, the next required"
-    echo "port is the Android guest/host architecture to Linux."
-    echo
-    echo "Alternatively, an ARM32 Linux build can be used if the"
-    echo "RK3326 kernel/userspace provides AArch32 compatibility."
-    echo
-    echo "No size assertions were disabled."
-    echo "No pointer types were rewritten automatically."
-    echo
-    echo "Architecture analysis:"
-    echo "  ${ANALYSIS_LOG}"
-    echo
-    echo "Structure assertions:"
-    echo "  ${OUT_DIR}/structure-assertions.txt"
-    echo
-
-    exit 42
-
-fi
-
-# ------------------------------------------------------------
-# 16. If project changes in the future and no longer has the
-#     32-bit Linux restriction, configure/build normally.
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "16. Configure"
-echo "============================================================"
-
-python3 configure.py --lto=thin
-
-# ------------------------------------------------------------
-# 17. Patch generated Ninja files only for actual compiler
-#     architecture flags.
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "17. Analyze generated Ninja files"
-echo "============================================================"
-
-find . \
-    -type f \
-    -name '*.ninja' \
-    -print \
-    > "${OUT_DIR}/ninja-files.txt"
-
-while IFS= read -r ninja_file; do
-
-    echo "Checking ${ninja_file}"
-
-    sed -i \
-        's/--target=i686-linux-gnu/--target=aarch64-linux-gnu --sysroot=\/usr\/aarch64-linux-gnu/g' \
-        "${ninja_file}"
-
-    sed -i \
-        's/-m32//g' \
-        "${ninja_file}"
-
-    sed -i \
-        's/-malign-double//g' \
-        "${ninja_file}"
-
-    sed -i \
-        's/-freg-struct-return//g' \
-        "${ninja_file}"
-
-    sed -i \
-        's/-march=native/-mcpu=cortex-a35/g' \
-        "${ninja_file}"
-
-done < "${OUT_DIR}/ninja-files.txt"
-
-# ------------------------------------------------------------
-# 18. Build
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "18. Ninja build"
-echo "============================================================"
-
-ninja -v
-
-# ------------------------------------------------------------
-# 19. Find executable
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "19. Find executable"
-echo "============================================================"
-
-mapfile -t CANDIDATES < <(
-    find build \
-        -type f \
-        \( \
-            -name 'halo' \
-            -o \
-            -name 'halo_ce*' \
-            -o \
-            -name 'halo*' \
-        \) \
-        -perm -111 \
-        -print \
-        2>/dev/null \
-        | sort
-)
-
-if [ "${#CANDIDATES[@]}" -eq 0 ]; then
-
-    echo "ERROR: No executable found."
-
-    find build \
-        -maxdepth 5 \
-        -type f \
-        -print \
-        | sort \
-        || true
-
-    exit 1
-
-fi
-
-BINARY_PATH="${CANDIDATES[0]}"
-
-echo
-echo "Selected binary:"
-echo "  ${BINARY_PATH}"
-
-file "${BINARY_PATH}" || true
-
-echo
-echo "ELF architecture:"
-readelf -h "${BINARY_PATH}" | grep -E \
-    'Class:|Data:|Machine:|OS/ABI:' \
-    || true
-
-# ------------------------------------------------------------
-# 20. Copy artifact
-# ------------------------------------------------------------
-
-cp \
-    "${BINARY_PATH}" \
-    "${OUT_DIR}/halo_ce_rk3326"
-
-echo
-echo "============================================================"
-echo "BUILD COMPLETE"
-echo "============================================================"
-echo
-echo "Output:"
-echo "  ${OUT_DIR}/halo_ce_rk3326"
-echo
-echo "Architecture:"
-file "${OUT_DIR}/halo_ce_rk3326" || true
-echo
+        try:
+            source.unlink()
+        except OSError:
+            pass
+
+        try:
+            output.unlink()
+        except OSError:
+            pass
+
+
+def test_arm32_linux() -> bool:
+
+    compiler = shutil.which("arm-linux-gnueabihf-gcc")
+
+    if compiler is None:
+        return False
+
+    source = ROOT / ".arm32_abi_test.c"
+
+    source.write_text(
+        r"""
+#include <stdint.h>
+
+_Static_assert(sizeof(void *) == 4,
+               "ARM32 must have 32-bit pointers");
+
+int main(void)
+{
+    return 0;
+}
+""",
+        encoding="utf-8",
+    )
+
+    output = ROOT / ".arm32_abi_test"
+
+    try:
+
+        returncode, text = run(
+            [
+                compiler,
+                "-mcpu=cortex-a35",
+                "-marm",
+                str(source),
+                "-o",
+                str(output),
+            ]
+        )
+
+        print(text)
+
+        return returncode == 0
+
+    finally:
+
+        try:
+            source.unlink()
+        except OSError:
+            pass
+
+        try:
+            output.unlink()
+        except OSError:
+            pass
+
+
+def find_assertions() -> list[Path]:
+
+    paths = grep_tree(
+        ["source"],
+        r"(size_assert|offset_assert|sizeof\s*\(\s*struct|offsetof\s*\(\s*struct)",
+    )
+
+    return sorted(set(paths))
+
+
+def find_android_architecture_files() -> list[Path]:
+
+    result: list[Path] = []
+
+    for directory in (
+        "port/android",
+        "guest",
+        "host",
+        "tools",
+    ):
+
+        root = ROOT / directory
+
+        if not root.exists():
+            continue
+
+        for path in root.rglob("*"):
+
+            if not path.is_file():
+                continue
+
+            content = read_text(path)
+
+            if (
+                "ILP32" in content
+                or "arm64_32" in content
+                or "android_abi" in path.name
+            ):
+                result.append(path)
+
+    return sorted(set(result))
+
+
+def print_report() -> dict[str, bool]:
+
+    print("=" * 60)
+    print("Halo CE ARM architecture analysis")
+    print("=" * 60)
+
+    project = detect_project()
+
+    print()
+    print("Project characteristics:")
+    print(
+        "  Linux 32-bit x86 guard: ",
+        project["linux_guard"],
+    )
+    print(
+        "  Structure layout asserts:",
+        project["size_asserts"],
+    )
+    print(
+        "  Android ILP32 code:      ",
+        project["android_ilp32"],
+    )
+    print(
+        "  arm64_32 support:        ",
+        project["arm64_32"],
+    )
+
+    print()
+    print("Compiler:")
+    print(
+        "  clang:",
+        shutil.which("clang") or "NOT FOUND",
+    )
+    print(
+        "  aarch64-linux-gnu-gcc:",
+        shutil.which("aarch64-linux-gnu-gcc") or "NOT FOUND",
+    )
+    print(
+        "  arm-linux-gnueabihf-gcc:",
+        shutil.which("arm-linux-gnueabihf-gcc") or "NOT FOUND",
+    )
+
+    print()
+    print("Clang target information:")
+
+    targets = clang_target_help()
+
+    if targets:
+        for line in targets.splitlines():
+            if "aarch64" in line.lower():
+                print(" ", line)
+
+    print()
+    print("ABI tests:")
+
+    lp64 = test_aarch64_lp64()
+    print(
+        "  AArch64 Linux LP64:",
+        "YES" if lp64 else "NO",
+    )
+
+    ilp32 = test_aarch64_ilp32()
+    print(
+        "  AArch64 ILP32 compiler:",
+        "YES" if ilp32 else "NO",
+    )
+
+    arm32 = test_arm32_linux()
+    print(
+        "  ARM32 Linux compiler:",
+        "YES" if arm32 else "NO",
+    )
+
+    print()
+    print("Structure assertions:")
+
+    assertions = find_assertions()
+
+    print(
+        f"  {len(assertions)} source files contain "
+        "layout checks."
+    )
+
+    for path in assertions[:50]:
+        print("   ", path.relative_to(ROOT))
+
+    print()
+    print("Android ILP32 implementation:")
+
+    android_files = find_android_architecture_files()
+
+    for path in android_files[:100]:
+        print("   ", path.relative_to(ROOT))
+
+    print()
+    print("=" * 60)
+    print("Architecture conclusion")
+    print("=" * 60)
+
+    if project["linux_guard"] and project["size_asserts"]:
+
+        print()
+        print(
+            "The upstream Linux port requires a 32-bit "
+            "data model."
+        )
+
+        print()
+        print(
+            "Normal AArch64 Linux is LP64 and therefore "
+            "uses 64-bit pointers."
+        )
+
+        print()
+        print(
+            "The Android port solves this using an "
+            "ILP32 AArch64 guest."
+        )
+
+        if ilp32:
+
+            print()
+            print(
+                "Clang accepts -mabi=ilp32, but this does "
+                "NOT mean a normal Ubuntu Linux executable "
+                "can be linked and executed."
+            )
+
+        print()
+        print(
+            "The safe options are:"
+        )
+
+        print(
+            "  1. Port the Android guest/host architecture "
+            "to Linux AArch64."
+        )
+
+        print(
+            "  2. Build the existing 32-bit game for "
+            "AArch32/ARM Linux."
+        )
+
+        print()
+        print(
+            "The script will NOT modify structure definitions "
+            "or disable layout assertions."
+        )
+
+    return {
+        **project,
+        "aarch64_lp64": lp64,
+        "aarch64_ilp32": ilp32,
+        "arm32": arm32,
+    }
+
+
+def patch_safe_flags() -> None:
+
+    configure = ROOT / "configure.py"
+
+    if not configure.exists():
+        print(
+            "[ERROR] configure.py not found.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    content = read_text(configure)
+
+    original = content
+
+    replacements = [
+        (
+            r"--target=i686-linux-gnu",
+            "--target=aarch64-linux-gnu "
+            "--sysroot=/usr/aarch64-linux-gnu",
+        ),
+        (
+            r"-m32",
+            "",
+        ),
+        (
+            r"-malign-double",
+            "",
+        ),
+        (
+            r"-freg-struct-return",
+            "",
+        ),
+        (
+            r"-march=native",
+            "-mcpu=cortex-a35",
+        ),
+    ]
+
+    for pattern, replacement in replacements:
+
+        content = re.sub(
+            pattern,
+            replacement,
+            content,
+        )
+
+    if content != original:
+
+        configure.write_text(
+            content,
+            encoding="utf-8",
+        )
+
+        print(
+            "[PATCHED] configure.py"
+        )
+
+    forbidden = [
+        r"--target=i686-linux-gnu",
+        r"-m32",
+        r"-malign-double",
+        r"-freg-struct-return",
+        r"-march=native",
+    ]
+
+    remaining = [
+        pattern
+        for pattern in forbidden
+        if re.search(pattern, content)
+    ]
+
+    if remaining:
+
+        print(
+            "[ERROR] Unsafe x86 flags remain:"
+        )
+
+        for item in remaining:
+            print(
+                " ",
+                item,
+            )
+
+        sys.exit(1)
+
+
+def main() -> None:
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--analyze-only",
+        action="store_true",
+        help="Only analyze the repository.",
+    )
+
+    parser.add_argument(
+        "--patch",
+        action="store_true",
+        help="Apply safe compiler-flag patches.",
+    )
+
+    args = parser.parse_args()
+
+    result = print_report()
+
+    if args.analyze_only:
+        return
+
+    if args.patch:
+
+        if (
+            result["linux_guard"]
+            and result["size_asserts"]
+        ):
+
+            print()
+            print(
+                "[SAFE MODE] The project requires ILP32."
+            )
+
+            print(
+                "No structure rewriting will be performed."
+            )
+
+            print(
+                "Only compiler flag cleanup is allowed."
+            )
+
+        patch_safe_flags()
+
+        print()
+        print(
+            "[OK] Safe compiler flag patching complete."
+        )
+
+    else:
+
+        print()
+        print(
+            "No source modifications requested."
+        )
+
+
+if __name__ == "__main__":
+    main()

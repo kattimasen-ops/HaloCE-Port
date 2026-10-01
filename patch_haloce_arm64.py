@@ -1,30 +1,173 @@
+#!/usr/bin/env python3
+
 import os
 import re
+import sys
 
-target_file = "configure.py"
 
-if os.path.exists(target_file):
-    with open(target_file, "r", encoding="utf-8") as f:
+def patch_file(filepath, replacements):
+    """
+    Apply a list of regex replacements to a file.
+    """
+
+    if not os.path.exists(filepath):
+        print(f"[SKIP] Datei nicht gefunden: {filepath}")
+        return False
+
+    with open(
+        filepath,
+        "r",
+        encoding="utf-8",
+        errors="ignore",
+    ) as f:
         content = f.read()
 
-    # 1. Injiziere ein neues Target für Linux ARM64 (RK3326), welches den Gast-Code von Android nutzt.
-    # Der Android Build nutzt musl libc für eine neue arm64_32 Architektur, um die 32-bit Limitierungen zu umgehen.
-    custom_target = """
-def target_linux_arm64(env):
-    # Nutze das SDL3 und GLES3 Backend von Android/Linux
-    env.append(CPPFLAGS=['-D_LINUX', '-DGLES3_SUPPORT'])
-    # Zwinge Clang in den 32-bit Pointer Modus auf AArch64
-    env.append(CCFLAGS=['-target', 'arm64_32-linux-musleabi', '-march=armv8-a', '-mabi=ilp32'])
-    env.append(LDFLAGS=['-fuse-ld=lld', '-Wl,-m,aarch64elf32'])
-"""
-    if "def target_linux_arm64" not in content:
-        content = content.replace("def target_android", custom_target + "\ndef target_android")
-        print("[PATCHED] configure.py: Linux ARM64 (ILP32) Target hinzugefügt.")
-    
-    # 2. Deaktiviere Bink-Video strikt, da es ohnehin nicht verfügbar ist (überspringt Videos).
-    content = content.replace("ENABLE_BINK = True", "ENABLE_BINK = False")
+    modified = content
 
-    with open(target_file, "w", encoding="utf-8") as f:
-        f.write(content)
-else:
-    print(f"[FEHLER] {target_file} nicht gefunden.")
+    for pattern, replacement in replacements:
+        modified = re.sub(
+            pattern,
+            replacement,
+            modified,
+        )
+
+    if modified != content:
+
+        with open(
+            filepath,
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write(modified)
+
+        print(f"[PATCHED] {filepath}")
+        return True
+
+    print(f"[NO CHANGE] {filepath}")
+    return False
+
+
+def verify_configure_py(filepath):
+    """
+    Make sure known x86-specific options are gone.
+    """
+
+    if not os.path.exists(filepath):
+        print(f"[ERROR] {filepath} nicht gefunden.")
+        return False
+
+    with open(
+        filepath,
+        "r",
+        encoding="utf-8",
+        errors="ignore",
+    ) as f:
+        content = f.read()
+
+    forbidden = [
+        r"--target=i686-linux-gnu",
+        r"-m32",
+        r"-malign-double",
+        r"-freg-struct-return",
+        r"-march=native",
+    ]
+
+    found = []
+
+    for pattern in forbidden:
+        if re.search(pattern, content):
+            found.append(pattern)
+
+    if found:
+        print(
+            "[ERROR] Folgende x86-Optionen wurden in "
+            "configure.py noch gefunden:"
+        )
+
+        for item in found:
+            print(f"    {item}")
+
+        return False
+
+    print(
+        "[OK] configure.py enthält keine bekannten "
+        "x86-spezifischen Optionen mehr."
+    )
+
+    return True
+
+
+def main():
+
+    print("============================================================")
+    print("Halo CE ARM64 / RK3326 Patch-Prozess")
+    print("============================================================")
+
+    configure_py = "configure.py"
+
+    # --------------------------------------------------------
+    # ARM64 Cross-Compilation
+    # --------------------------------------------------------
+
+    replacements = [
+        (
+            r"--target=i686-linux-gnu",
+            "--target=aarch64-linux-gnu "
+            "--sysroot=/usr/aarch64-linux-gnu",
+        ),
+
+        (
+            r"-m32",
+            "",
+        ),
+
+        (
+            r"-malign-double",
+            "",
+        ),
+
+        (
+            r"-freg-struct-return",
+            "",
+        ),
+
+        (
+            r"-march=native",
+            "-mcpu=cortex-a35",
+        ),
+    ]
+
+    print("==> Patche configure.py...")
+
+    patch_file(
+        configure_py,
+        replacements,
+    )
+
+    # --------------------------------------------------------
+    # Verification
+    # --------------------------------------------------------
+
+    print("==> Prüfe configure.py...")
+
+    if not verify_configure_py(configure_py):
+        print(
+            "❌ ARM64-Patch konnte nicht erfolgreich "
+            "verifiziert werden."
+        )
+        sys.exit(1)
+
+    # --------------------------------------------------------
+    # Abschluss
+    # --------------------------------------------------------
+
+    print("============================================================")
+    print("ARM64 / RK3326 Patch erfolgreich abgeschlossen.")
+    print("Target: aarch64-linux-gnu")
+    print("CPU:    cortex-a35")
+    print("Sysroot: /usr/aarch64-linux-gnu")
+    print("============================================================")
+
+
+if __name__ == "__main__":
+    main()

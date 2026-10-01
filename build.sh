@@ -10,18 +10,13 @@ echo "==> Host arch: $(uname -m)"
 # APT Update
 apt-get update
 
-echo "==> Installiere Build-Tools"
+echo "==> Installiere Build-Tools & ARM64 Cross-Compiler"
 apt-get install -y --no-install-recommends \
   build-essential git pkg-config ca-certificates wget zip \
-  python3 ninja-build clang lld llvm \
-  crossbuild-essential-arm64 libc6-dev-i386 \
+  python3 ninja-build clang lld llvm cmake \
+  gcc-aarch64-linux-gnu g++-aarch64-linux-gnu crossbuild-essential-arm64 \
   libgbm-dev:arm64 libegl1-mesa-dev:arm64 libgles2-mesa-dev:arm64 \
   libdrm-dev:arm64 libx11-dev:arm64 libasound2-dev:arm64 libpulse-dev:arm64
-
-echo "==> Erstelle Symlink für Kernel-Header (asm/errno.h Fix)"
-if [ ! -d "/usr/include/asm" ]; then
-  ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm
-fi
 
 export SRC_DIR="/work/src"
 export OUT_DIR="/work/out/haloce.aarch64"
@@ -39,8 +34,22 @@ if [ -f "/work/patch_haloce_arm64.py" ]; then
   python3 /work/patch_haloce_arm64.py
 fi
 
-echo "==> Konfiguriere Build..."
-python3 configure.py --lto=thin
+echo "==> Ermittle gepatchtes ARM64-Target für configure.py..."
+TARGET_ARG=""
+if python3 configure.py --help 2>&1 | grep -q "linux_arm64"; then
+  TARGET_ARG="--target=linux_arm64"
+elif python3 configure.py --help 2>&1 | grep -q "linux_arm64_32"; then
+  TARGET_ARG="--target=linux_arm64_32"
+elif python3 configure.py --help 2>&1 | grep -q "linux_aarch64"; then
+  TARGET_ARG="--target=linux_aarch64"
+elif python3 configure.py --help 2>&1 | grep -q "arm64"; then
+  TARGET_ARG="--target=arm64"
+elif python3 configure.py --help 2>&1 | grep -q "rk3326"; then
+  TARGET_ARG="--target=rk3326"
+fi
+
+echo "==> Konfiguriere Build mit Target: ${TARGET_ARG:-default}"
+python3 configure.py ${TARGET_ARG} --lto=thin
 
 echo "==> Baue Halo CE..."
 ninja

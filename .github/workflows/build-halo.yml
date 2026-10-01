@@ -39,6 +39,9 @@ jobs:
             libdrm-dev:arm64 libx11-dev:arm64 libasound2-dev:arm64 \
             libpulse-dev:arm64 libwayland-dev:arm64 libxkbcommon-dev:arm64
 
+          # Symlink für 32-Bit Linux Kernel Header
+          sudo ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm
+
       - name: 🏗️ Baue SDL3 für ARM64 aus den Quellen (KMSDRM Support)
         run: |
           git clone --depth=1 https://github.com/libsdl-org/SDL.git sdl3-src

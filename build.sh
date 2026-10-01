@@ -29,23 +29,33 @@ if [ ! -d "halo-ce-universal" ]; then
 fi
 cd halo-ce-universal
 
-echo "==> Lösche alten Build-Ordner..."
-rm -rf build
+echo "==> 1. Erster configure.py Aufruf (Downloads & Git-Checkout)..."
+python3 configure.py --lto=thin || true
 
-echo "==> Wende RK3326 spezifische Python-Patches an..."
+echo "==> 2. Deaktiviere automatisches Git-Reset in configure.py..."
+sed -i 's/git checkout/echo skipping git checkout/g' configure.py
+
+echo "==> 3. Patche configure.py auf ARM64 (aarch64)..."
+sed -i 's/i686-linux-gnu/aarch64-linux-gnu/g' configure.py
+sed -i 's/-m32//g' configure.py
+sed -i 's/-malign-double//g' configure.py
+sed -i 's/-march=native/-mcpu=cortex-a35/g' configure.py
+
+echo "==> 4. Wende RK3326 spezifische Python-Patches an..."
 if [ -f "/work/patch_haloce_arm64.py" ]; then
   python3 /work/patch_haloce_arm64.py
 fi
 
-echo "==> Patche configure.py direkt für ARM64 (aarch64)..."
-sed -i 's/--target=i686-linux-gnu/--target=aarch64-linux-gnu/g' configure.py
-sed -i 's/-m32//g' configure.py
-sed -i 's/-malign-double//g' configure.py
-
-echo "==> Konfiguriere Build..."
+echo "==> 5. Regeneriere Build-Dateien für ARM64..."
 python3 configure.py --lto=thin
 
-echo "==> Baue Halo CE..."
+echo "==> 6. Sichere Ersetzung aller x86-Flags in generierten Ninja-Dateien..."
+find build -name "*.ninja" -exec sed -i 's/--target=i686-linux-gnu/--target=aarch64-linux-gnu/g' {} +
+find build -name "*.ninja" -exec sed -i 's/-m32//g' {} +
+find build -name "*.ninja" -exec sed -i 's/-malign-double//g' {} +
+find build -name "*.ninja" -exec sed -i 's/-march=native/-mcpu=cortex-a35/g' {} +
+
+echo "==> 7. Baue Halo CE..."
 ninja
 
 echo "==> Suche und kopiere kompilierte Executable..."

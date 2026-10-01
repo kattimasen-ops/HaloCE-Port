@@ -10,11 +10,11 @@ echo "==> Host arch: $(uname -m)"
 # APT Update
 apt-get update
 
-echo "==> Installiere Build-Tools"
+echo "==> Installiere Build-Tools (inkl. 32-Bit Multilib Headern)"
 apt-get install -y --no-install-recommends \
   build-essential git pkg-config ca-certificates wget zip \
   python3 ninja-build clang lld llvm \
-  crossbuild-essential-arm64 \
+  crossbuild-essential-arm64 libc6-dev-i386 \
   libgbm-dev:arm64 libegl1-mesa-dev:arm64 libgles2-mesa-dev:arm64 \
   libdrm-dev:arm64 libx11-dev:arm64 libasound2-dev:arm64 libpulse-dev:arm64
 
@@ -37,20 +37,19 @@ fi
 echo "==> Konfiguriere Build..."
 python3 configure.py --lto=thin
 
-echo "==> Baue Halo CE (Standard-Target)..."
+echo "==> Baue Halo CE..."
 ninja
 
 echo "==> Suche und kopiere kompilierte Executable..."
 mkdir -p "${OUT_DIR}"
 
-# Findet das gebaute Binary im build-Verzeichnis automatisch
 BINARY_PATH=$(find build -type f -executable -name "halo_ce*" -o -name "halo*" | head -n 1)
 
 if [ -n "$BINARY_PATH" ]; then
   cp "$BINARY_PATH" "${OUT_DIR}/halo_ce_rk3326"
   echo "==> Binary erfolgreich kopiert: $BINARY_PATH -> ${OUT_DIR}/halo_ce_rk3326"
 else
-  echo "❌ FEHLER: Kein kompilierte Executable im Ordner 'build' gefunden!"
+  echo "❌ FEHLER: Keine kompilierte Executable im Ordner 'build' gefunden!"
   exit 1
 fi
 

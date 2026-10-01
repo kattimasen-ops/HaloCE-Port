@@ -15,6 +15,7 @@ apt-get install -y --no-install-recommends \
   build-essential git pkg-config ca-certificates wget zip \
   python3 ninja-build clang lld llvm cmake \
   gcc-aarch64-linux-gnu g++-aarch64-linux-gnu crossbuild-essential-arm64 \
+  libc6-dev-i386 gcc-multilib g++-multilib \
   libgbm-dev:arm64 libegl1-mesa-dev:arm64 libgles2-mesa-dev:arm64 \
   libdrm-dev:arm64 libx11-dev:arm64 libasound2-dev:arm64 libpulse-dev:arm64
 
@@ -28,6 +29,9 @@ if [ ! -d "halo-ce-universal" ]; then
   git clone --depth=1 https://github.com/cybersecurity/halo-ce-universal.git
 fi
 cd halo-ce-universal
+
+echo "==> Säubere alten Build-Cache..."
+rm -rf build
 
 echo "==> Wende RK3326 spezifische Python-Patches an"
 if [ -f "/work/patch_haloce_arm64.py" ]; then

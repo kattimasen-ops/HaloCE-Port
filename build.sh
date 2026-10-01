@@ -10,13 +10,18 @@ echo "==> Host arch: $(uname -m)"
 # APT Update
 apt-get update
 
-echo "==> Installiere Build-Tools (inkl. 32-Bit Multilib Headern)"
+echo "==> Installiere Build-Tools"
 apt-get install -y --no-install-recommends \
   build-essential git pkg-config ca-certificates wget zip \
   python3 ninja-build clang lld llvm \
   crossbuild-essential-arm64 libc6-dev-i386 \
   libgbm-dev:arm64 libegl1-mesa-dev:arm64 libgles2-mesa-dev:arm64 \
   libdrm-dev:arm64 libx11-dev:arm64 libasound2-dev:arm64 libpulse-dev:arm64
+
+echo "==> Erstelle Symlink für Kernel-Header (asm/errno.h Fix)"
+if [ ! -d "/usr/include/asm" ]; then
+  ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/asm
+fi
 
 export SRC_DIR="/work/src"
 export OUT_DIR="/work/out/haloce.aarch64"
